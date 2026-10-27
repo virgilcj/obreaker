@@ -48,7 +48,7 @@ Built to test against [BRuteLogic's OAuth Testbed](https://403.brutelogic.net/au
 
 ```bash
 # Clone
-git clone https://github.com/yourusername/obreaker.git
+git clone https://github.com/virgilcj/obreaker.git
 cd obreaker
 
 # Only dependency
