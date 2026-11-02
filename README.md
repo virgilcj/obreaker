@@ -27,7 +27,7 @@ Works against **any OAuth 2.0 / OpenID Connect** implementation. Point it at a t
 
 | # | Key | Technique | Severity | Description |
 |---|-----|-----------|----------|-------------|
-| 1 | `response-mode` | Response Mode Escape | Critical | `redirect_uri` not validated across response modes — code delivered to attacker-controlled URI |
+| 1 | `response-mode` | Response Mode Escape | Critical | `redirect_uri` not validated — cross-domain redirect OR path-traversal bypass (`/../`) to steal codes/tokens |
 | 2 | `missing-state` | Missing State | Critical | No CSRF state issued or validated — login CSRF enables account takeover |
 | 3 | `static-state` | Static State | Critical | Static state value shared across all sessions — replay in CSRF attack |
 | 4 | `predictable-state` | Predictable State | Critical | State derived from timestamp — predictable, enabling CSRF |
@@ -271,6 +271,7 @@ The `--json` flag writes structured output with full attack chains and proof obj
 ### Tested Against
 - [BRuteLogic OAuth Testbed](https://403.brutelogic.net/authz/oauth) (use `--profile brutelogic`)
 - [PortSwigger OAuth Implicit Flow Lab](https://portswigger.net/web-security/oauth/lab-oauth-authentication-bypass-via-oauth-implicit-flow) (technique #18: `implicit-identity`)
+- [PortSwigger Stealing OAuth Tokens via Open Redirect](https://portswigger.net/web-security/oauth/lab-oauth-stealing-oauth-access-tokens-via-an-open-redirect) (technique #1: `response-mode` path traversal probe)
 
 ---
 
