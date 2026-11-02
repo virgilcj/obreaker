@@ -1,6 +1,6 @@
 # OBreaker — OAuth Authorization Bypass Exploit Tool
 
-**Full end-to-end exploitation of 18 OAuth/OIDC bypass techniques against any OAuth 2.0 server.**
+**Full end-to-end exploitation of 18 OAuth/OIDC bypass techniques (+ DCR SSRF sub-probe) against any OAuth 2.0 server.**
 
 OBreaker goes beyond detection — every finding completes the full **Find -> Forge -> Fire** attack chain: detect the vulnerability, craft an exploit payload, exchange for an access token, access protected resources, and prove identity theft with decoded JWT claims.
 
@@ -38,7 +38,7 @@ Works against **any OAuth 2.0 / OpenID Connect** implementation. Point it at a t
 | 9 | `aud-validation` | Missing aud Validation | Critical | Resource server doesn't validate JWT `aud` claim — cross-service token replay |
 | 10 | `race` | OAuth Singleton Race | Critical | Shared singleton verifier state — concurrent requests enable cross-session code exchange |
 | 11 | `prompt-none` | prompt=none Silent Redirect | Critical | `redirect_uri` not validated with `prompt=none` — silent code theft |
-| 12 | `dcr` | Dynamic Client Registration | Medium | Registration endpoint exposed — rogue client registration possible |
+| 12 | `dcr` | Dynamic Client Registration + SSRF | Medium/Critical | Registration endpoint exposed — rogue client registration + SSRF via `logo_uri`/`jwks_uri`/`sector_identifier_uri`/`request_uris` metadata fields |
 | 13 | `mfa-bypass` | Grant Type -> MFA Bypass | Critical | Password grant bypasses browser-bound MFA entirely |
 | 14 | `auth-method` | Auth Method Confusion | Critical | `private_key_jwt` registered but `client_secret_basic` accepted as fallback |
 | 15 | `code-replay` | Code Replay | Critical | Authorization code reusable multiple times — no single-use enforcement |
@@ -272,6 +272,9 @@ The `--json` flag writes structured output with full attack chains and proof obj
 - [BRuteLogic OAuth Testbed](https://403.brutelogic.net/authz/oauth) (use `--profile brutelogic`)
 - [PortSwigger OAuth Implicit Flow Lab](https://portswigger.net/web-security/oauth/lab-oauth-authentication-bypass-via-oauth-implicit-flow) (technique #18: `implicit-identity`)
 - [PortSwigger Stealing OAuth Tokens via Open Redirect](https://portswigger.net/web-security/oauth/lab-oauth-stealing-oauth-access-tokens-via-an-open-redirect) (technique #1: `response-mode` path traversal probe)
+- [PortSwigger Forced OAuth Profile Linking](https://portswigger.net/web-security/oauth/lab-oauth-forced-oauth-profile-linking) (technique #2: `missing-state` CSRF)
+- [PortSwigger SSRF via OpenID DCR](https://portswigger.net/web-security/oauth/openid/lab-oauth-ssrf-via-openid-dynamic-client-registration) (technique #12: `dcr` open registration + SSRF via `logo_uri`)
+- [PortSwigger Stealing Tokens via Proxy Page](https://portswigger.net/web-security/oauth/lab-oauth-stealing-oauth-access-tokens-via-a-proxy-page) (technique #1: `response-mode` path traversal + postMessage proxy)
 
 ---
 
