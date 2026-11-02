@@ -139,12 +139,28 @@ OBreaker probes the **standard OAuth endpoints** (`/authorize`, `/token`, `/regi
 1. **Authorization endpoint probing** — sends requests with missing/manipulated parameters (no `state`, no `code_challenge`, `plain` instead of `S256`, unregistered `redirect_uri`) and analyzes whether the server rejects or accepts them
 2. **Token endpoint probing** — tests grant type acceptance (`password` grant), auth method fallbacks (Basic auth when `private_key_jwt` registered), code replay, scope escalation at refresh
 3. **Registration probing** — checks if Dynamic Client Registration is open
-4. **Full exploitation** — when `--code`, `--credentials`, or `--refresh-token` are provided, completes the full chain: code exchange, token theft, resource access, identity proof
+4. **Implicit flow / client-side probing** — tests if `response_type=token` is accepted (RFC 9700 violation), then with credentials attempts full identity substitution against the client app's authenticate endpoint
+5. **Full exploitation** — when `--code`, `--credentials`, or `--refresh-token` are provided, completes the full chain: code exchange, token theft, resource access, identity proof
 
 Detection heuristics:
 - Server returns **400/error mentioning the parameter** -> properly enforced, NOT vulnerable
 - Server **accepts the request** (200/302) without the security parameter -> vulnerable
 - Server rejects for **wrong credentials but accepts the grant type** -> grant type available (vulnerability)
+
+### Implicit Flow Identity Substitution (#18)
+
+Technique #18 is unique — it targets a **client-side vulnerability**, not a server misconfiguration. In OAuth implicit flow (`response_type=token`), the access token is delivered directly to the browser via URL fragment. Many client apps then:
+
+1. Call the OAuth provider's `/userinfo` or `/me` endpoint to get the user's email/username
+2. POST `{email, username, token}` to their own `/authenticate` backend
+3. The backend issues a session — **without verifying the email matches the token**
+
+The attack: get a valid token for your own account, substitute the victim's email in the POST, and receive a session as the victim. The backend never checks because it trusts the client-side JS.
+
+**Detection tiers:**
+- **No extra args** — detects implicit flow support (RFC 9700 S2.1.2 violation), flags the risk
+- **`--credentials`** — completes the implicit flow, proves token acquisition
+- **`--credentials` + `--victim-email` + `--authenticate-url`** — full account takeover: obtains attacker's token, substitutes victim email, proves session as victim
 
 ### Profile Mode
 
